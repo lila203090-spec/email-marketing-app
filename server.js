@@ -13,9 +13,12 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
-    origin: process.env.FRONTEND_URL || '*',
-    credentials: true
+    origin: true,
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
+
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static('public'));
@@ -27,17 +30,24 @@ app.use(session({
     saveUninitialized: false,
     cookie: { 
         secure: false,
-        maxAge: 24 * 60 * 60 * 1000
+        httpOnly: true,
+        maxAge: 24 * 60 * 60 * 1000,
+        sameSite: 'lax'
     }
 }));
 
 // File upload configuration
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        const uploadDir = `./uploads/${req.session.userId}`;
-        if (!fs.existsSync('./uploads')) fs.mkdirSync('./uploads');
-        if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
-        cb(null, uploadDir);
+        const uploadDir = './uploads';
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        const userDir = `${uploadDir}/${req.session.userId || 'temp'}`;
+        if (!fs.existsSync(userDir)) {
+            fs.mkdirSync(userDir, { recursive: true });
+        }
+        cb(null, userDir);
     },
     filename: function (req, file, cb) {
         cb(null, Date.now() + '-' + file.originalname);
@@ -46,7 +56,14 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 25 * 1024 * 1024 }
+    limits: { 
+        fileSize: 25 * 1024 * 1024,
+        files: 10
+    },
+    fileFilter: function(req, file, cb) {
+        console.log('Uploading file:', file.originalname);
+        cb(null, true);
+    }
 });
 
 // Database
@@ -58,8 +75,8 @@ function loadDB() {
             users: [],
             admin: {
                 username: 'Digonta',
-                password: bcrypt.hashSync('Digonta@1', 10),
-                email: 'admin@system.com',
+                password: bcrypt.hashSync('Digonta123', 10),
+                email: 'digonta@system.com',
                 role: 'admin'
             }
         };
@@ -75,6 +92,7 @@ function saveDB(db) {
 
 // Auth middleware
 function requireAuth(req, res, next) {
+    console.log('Auth check - Session userId:', req.session.userId);
     if (!req.session.userId) {
         return res.status(401).json({ error: 'Not authenticated' });
     }
@@ -93,11 +111,14 @@ app.post('/api/auth/login', (req, res) => {
     const { username, password } = req.body;
     const db = loadDB();
     
+    console.log('Login attempt:', username);
+    
     if (username === db.admin.username) {
         if (bcrypt.compareSync(password, db.admin.password)) {
             req.session.userId = 'admin';
             req.session.username = username;
             req.session.role = 'admin';
+            console.log('Admin login successful');
             return res.json({ 
                 success: true, 
                 role: 'admin',
@@ -114,6 +135,7 @@ app.post('/api/auth/login', (req, res) => {
         req.session.userId = user.id;
         req.session.username = user.username;
         req.session.role = 'user';
+        console.log('User login successful:', user.id);
         return res.json({ 
             success: true, 
             role: 'user',
@@ -234,6 +256,8 @@ app.get('/api/user/data', requireAuth, (req, res) => {
     const db = loadDB();
     const user = db.users.find(u => u.id === req.session.userId);
     
+    console.log('Getting user data for:', req.session.userId);
+    
     if (!user) {
         return res.status(404).json({ error: 'User not found' });
     }
@@ -241,11 +265,11 @@ app.get('/api/user/data', requireAuth, (req, res) => {
     res.json({
         success: true,
         data: {
-            emails: user.emails,
-            senderAccounts: user.senderAccounts.map(acc => ({
+            emails: user.emails || [],
+            senderAccounts: (user.senderAccounts || []).map(acc => ({
                 email: acc.email,
-                sent: acc.sent,
-                dailySent: acc.dailySent
+                sent: acc.sent || 0,
+                dailySent: acc.dailySent || 0
             })),
             stats: user.stats,
             dailyLimit: user.dailyLimit
@@ -258,8 +282,24 @@ app.post('/api/user/add-account', requireAuth, (req, res) => {
     const db = loadDB();
     const user = db.users.find(u => u.id === req.session.userId);
     
+    console.log('Adding account for user:', req.session.userId);
+    console.log('Account email:', email);
+    
     if (!user) {
         return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password required' });
+    }
+    
+    // Check if account already exists
+    if (user.senderAccounts && user.senderAccounts.find(acc => acc.email === email)) {
+        return res.status(400).json({ error: 'Account already exists' });
+    }
+    
+    if (!user.senderAccounts) {
+        user.senderAccounts = [];
     }
     
     user.senderAccounts.push({
@@ -271,7 +311,8 @@ app.post('/api/user/add-account', requireAuth, (req, res) => {
     });
     
     saveDB(db);
-    res.json({ success: true });
+    console.log('Account added successfully');
+    res.json({ success: true, message: 'Account added successfully' });
 });
 
 app.post('/api/user/add-email', requireAuth, (req, res) => {
@@ -281,6 +322,14 @@ app.post('/api/user/add-email', requireAuth, (req, res) => {
     
     if (!user) {
         return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (!email) {
+        return res.status(400).json({ error: 'Email required' });
+    }
+    
+    if (!user.emails) {
+        user.emails = [];
     }
     
     user.emails.push({
@@ -310,15 +359,32 @@ app.post('/api/user/clear-emails', requireAuth, (req, res) => {
 
 app.post('/api/user/upload', requireAuth, upload.array('files', 10), (req, res) => {
     try {
+        console.log('Upload request received');
+        console.log('Session userId:', req.session.userId);
+        console.log('Files received:', req.files ? req.files.length : 0);
+        
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'No files uploaded' 
+            });
+        }
+        
         const files = req.files.map(file => ({
             filename: file.filename,
             originalname: file.originalname,
             path: file.path,
             size: file.size
         }));
-        res.json({ success: true, files });
+        
+        console.log('Files processed successfully:', files.length);
+        res.json({ success: true, files: files });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Upload error:', error);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
@@ -331,8 +397,8 @@ app.post('/api/user/send-email', requireAuth, async (req, res) => {
         return res.status(403).json({ error: 'Account inactive' });
     }
     
-    if (user.senderAccounts.length === 0) {
-        return res.status(400).json({ error: 'No sender accounts' });
+    if (!user.senderAccounts || user.senderAccounts.length === 0) {
+        return res.status(400).json({ error: 'No sender accounts configured' });
     }
     
     const account = user.senderAccounts[0];
@@ -406,8 +472,8 @@ app.post('/api/user/send-campaign', requireAuth, async (req, res) => {
         return res.status(400).json({ error: 'No recipients' });
     }
     
-    if (user.senderAccounts.length === 0) {
-        return res.status(400).json({ error: 'No sender accounts' });
+    if (!user.senderAccounts || user.senderAccounts.length === 0) {
+        return res.status(400).json({ error: 'No sender accounts configured' });
     }
     
     sendCampaignInBackground(user.id, recipients, subject, body, fromName, delay || 60, attachments, replyTo, isHtml);
@@ -420,8 +486,8 @@ app.post('/api/user/send-campaign', requireAuth, async (req, res) => {
 });
 
 async function sendCampaignInBackground(userId, recipients, subject, body, fromName, delay, attachments, replyTo, isHtml) {
-    const db = loadDB();
-    const user = db.users.find(u => u.id === userId);
+    let db = loadDB();
+    let user = db.users.find(u => u.id === userId);
     
     if (!user) return;
     
@@ -472,6 +538,12 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
             account.dailySent++;
             user.stats.totalSent++;
             
+            db = loadDB();
+            user = db.users.find(u => u.id === userId);
+            const updatedAccount = user.senderAccounts[accountIndex];
+            updatedAccount.sent = account.sent;
+            updatedAccount.dailySent = account.dailySent;
+            user.stats.totalSent = account.sent;
             saveDB(db);
             
             console.log(`✓ [${user.username}] Sent to ${recipient.email} (${i+1}/${recipients.length})`);
@@ -492,6 +564,7 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
 }
 
 function replaceMergeTags(text, recipient) {
+    if (!text) return '';
     return text
         .replace(/{Email}/g, recipient.email || '')
         .replace(/{FirstName}/g, recipient.firstName || '')
@@ -511,6 +584,11 @@ app.get('/api/test', (req, res) => {
     });
 });
 
+// Serve index.html for root path
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 app.listen(PORT, () => {
     console.log(`
 ╔═════════════════════════════════════════════════════════╗
@@ -518,9 +596,8 @@ app.listen(PORT, () => {
 ║   Server: http://localhost:${PORT}                       ║
 ║                                                         ║
 ║   DEFAULT ADMIN LOGIN:                                  ║
-║   Username: admin                                       ║
-║   Password: admin123                                    ║
+║   Username: Digonta                                     ║
+║   Password: Digonta123                                  ║
 ╚═════════════════════════════════════════════════════════╝
     `);
 });
-
