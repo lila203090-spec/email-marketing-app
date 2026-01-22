@@ -57,8 +57,8 @@ function loadDB() {
         const initialDB = {
             users: [],
             admin: {
-                username: 'admin',
-                password: bcrypt.hashSync('admin123', 10),
+                username: 'Digonta',
+                password: bcrypt.hashSync('Digonta@1', 10),
                 email: 'admin@system.com',
                 role: 'admin'
             }
@@ -523,3 +523,4 @@ app.listen(PORT, () => {
 ╚═════════════════════════════════════════════════════════╝
     `);
 });
+
