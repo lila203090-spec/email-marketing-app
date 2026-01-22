@@ -1,7 +1,6 @@
 {
   "name": "email-marketing-system",
   "version": "1.0.0",
-  "description": "Multi-user email marketing system",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
