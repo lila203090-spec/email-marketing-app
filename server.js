@@ -150,6 +150,10 @@ app.post('/api/admin/create-user', requireAdmin, (req, res) => {
         return res.status(400).json({ error: 'Username already exists' });
     }
     
+    if (db.users.find(u => u.email === email)) {
+        return res.status(400).json({ error: 'Email already exists' });
+    }
+    
     const newUser = {
         id: Date.now().toString(),
         username: username,
