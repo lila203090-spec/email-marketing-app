@@ -3,25 +3,40 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const multer = require('multer');
-const path = require('path');
+const session = require('express-session');
+const bcrypt = require('bcrypt');
 const fs = require('fs');
+const path = require('path');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+    origin: process.env.FRONTEND_URL || '*',
+    credentials: true
+}));
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static('public'));
 
+// Session configuration
+app.use(session({
+    secret: 'email-marketing-secret-key-2024',
+    resave: false,
+    saveUninitialized: false,
+    cookie: { 
+        secure: false,
+        maxAge: 24 * 60 * 60 * 1000
+    }
+}));
+
 // File upload configuration
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        const uploadDir = './uploads';
-        if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir);
-        }
+        const uploadDir = `./uploads/${req.session.userId}`;
+        if (!fs.existsSync('./uploads')) fs.mkdirSync('./uploads');
+        if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
         cb(null, uploadDir);
     },
     filename: function (req, file, cb) {
@@ -31,42 +46,265 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 25 * 1024 * 1024 } // 25MB limit
+    limits: { fileSize: 25 * 1024 * 1024 }
 });
 
-// Store sender accounts
-let senderAccounts = [];
-let campaignStats = {
-    totalSent: 0,
-    totalFailed: 0,
-    lastCampaignTime: null
-};
+// Database
+const DB_FILE = './database.json';
 
-// Add sender account endpoint
-app.post('/api/add-account', (req, res) => {
-    const { email, password } = req.body;
+function loadDB() {
+    if (!fs.existsSync(DB_FILE)) {
+        const initialDB = {
+            users: [],
+            admin: {
+                username: 'admin',
+                password: bcrypt.hashSync('admin123', 10),
+                email: 'admin@system.com',
+                role: 'admin'
+            }
+        };
+        fs.writeFileSync(DB_FILE, JSON.stringify(initialDB, null, 2));
+        return initialDB;
+    }
+    return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+}
+
+function saveDB(db) {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
+
+// Auth middleware
+function requireAuth(req, res, next) {
+    if (!req.session.userId) {
+        return res.status(401).json({ error: 'Not authenticated' });
+    }
+    next();
+}
+
+function requireAdmin(req, res, next) {
+    if (!req.session.userId || req.session.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+}
+
+// AUTH ENDPOINTS
+app.post('/api/auth/login', (req, res) => {
+    const { username, password } = req.body;
+    const db = loadDB();
     
-    if (!email || !password) {
-        return res.status(400).json({ error: 'Email and password required' });
+    if (username === db.admin.username) {
+        if (bcrypt.compareSync(password, db.admin.password)) {
+            req.session.userId = 'admin';
+            req.session.username = username;
+            req.session.role = 'admin';
+            return res.json({ 
+                success: true, 
+                role: 'admin',
+                username: username 
+            });
+        }
     }
     
-    senderAccounts.push({ email, password, sent: 0, dailySent: 0 });
-    res.json({ success: true, message: 'Account added successfully' });
+    const user = db.users.find(u => u.username === username);
+    if (user && bcrypt.compareSync(password, user.password)) {
+        if (!user.active) {
+            return res.status(403).json({ error: 'Account deactivated' });
+        }
+        req.session.userId = user.id;
+        req.session.username = user.username;
+        req.session.role = 'user';
+        return res.json({ 
+            success: true, 
+            role: 'user',
+            username: user.username 
+        });
+    }
+    
+    res.status(401).json({ error: 'Invalid credentials' });
 });
 
-// Get accounts endpoint
-app.get('/api/accounts', (req, res) => {
-    res.json({ 
-        accounts: senderAccounts.map(acc => ({ 
-            email: acc.email, 
-            sent: acc.sent,
-            dailySent: acc.dailySent 
-        })) 
+app.post('/api/auth/logout', (req, res) => {
+    req.session.destroy();
+    res.json({ success: true });
+});
+
+app.get('/api/auth/check', (req, res) => {
+    if (req.session.userId) {
+        res.json({ 
+            authenticated: true,
+            username: req.session.username,
+            role: req.session.role
+        });
+    } else {
+        res.json({ authenticated: false });
+    }
+});
+
+// ADMIN ENDPOINTS
+app.post('/api/admin/create-user', requireAdmin, (req, res) => {
+    const { username, password, email, dailyLimit } = req.body;
+    const db = loadDB();
+    
+    if (db.users.find(u => u.username === username)) {
+        return res.status(400).json({ error: 'Username already exists' });
+    }
+    
+    const newUser = {
+        id: Date.now().toString(),
+        username: username,
+        password: bcrypt.hashSync(password, 10),
+        email: email,
+        dailyLimit: dailyLimit || 500,
+        active: true,
+        createdAt: new Date().toISOString(),
+        senderAccounts: [],
+        emails: [],
+        stats: {
+            totalSent: 0,
+            totalFailed: 0,
+            lastLogin: null
+        }
+    };
+    
+    db.users.push(newUser);
+    saveDB(db);
+    
+    res.json({ success: true, userId: newUser.id });
+});
+
+app.get('/api/admin/users', requireAdmin, (req, res) => {
+    const db = loadDB();
+    const users = db.users.map(u => ({
+        id: u.id,
+        username: u.username,
+        email: u.email,
+        active: u.active,
+        dailyLimit: u.dailyLimit,
+        stats: u.stats,
+        senderAccounts: u.senderAccounts.length,
+        emails: u.emails.length
+    }));
+    res.json({ success: true, users });
+});
+
+app.post('/api/admin/update-user', requireAdmin, (req, res) => {
+    const { userId, active, dailyLimit } = req.body;
+    const db = loadDB();
+    const user = db.users.find(u => u.id === userId);
+    
+    if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (active !== undefined) user.active = active;
+    if (dailyLimit) user.dailyLimit = dailyLimit;
+    
+    saveDB(db);
+    res.json({ success: true });
+});
+
+app.post('/api/admin/delete-user', requireAdmin, (req, res) => {
+    const { userId } = req.body;
+    const db = loadDB();
+    db.users = db.users.filter(u => u.id !== userId);
+    saveDB(db);
+    res.json({ success: true });
+});
+
+app.get('/api/admin/stats', requireAdmin, (req, res) => {
+    const db = loadDB();
+    const stats = {
+        totalUsers: db.users.length,
+        activeUsers: db.users.filter(u => u.active).length,
+        totalSent: db.users.reduce((sum, u) => sum + u.stats.totalSent, 0),
+        totalFailed: db.users.reduce((sum, u) => sum + u.stats.totalFailed, 0),
+        totalEmails: db.users.reduce((sum, u) => sum + u.emails.length, 0),
+        totalAccounts: db.users.reduce((sum, u) => sum + u.senderAccounts.length, 0)
+    };
+    res.json({ success: true, stats });
+});
+
+// USER ENDPOINTS
+app.get('/api/user/data', requireAuth, (req, res) => {
+    const db = loadDB();
+    const user = db.users.find(u => u.id === req.session.userId);
+    
+    if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json({
+        success: true,
+        data: {
+            emails: user.emails,
+            senderAccounts: user.senderAccounts.map(acc => ({
+                email: acc.email,
+                sent: acc.sent,
+                dailySent: acc.dailySent
+            })),
+            stats: user.stats,
+            dailyLimit: user.dailyLimit
+        }
     });
 });
 
-// Upload attachments endpoint
-app.post('/api/upload-attachments', upload.array('files', 10), (req, res) => {
+app.post('/api/user/add-account', requireAuth, (req, res) => {
+    const { email, password } = req.body;
+    const db = loadDB();
+    const user = db.users.find(u => u.id === req.session.userId);
+    
+    if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+    }
+    
+    user.senderAccounts.push({
+        email: email,
+        password: password,
+        sent: 0,
+        dailySent: 0,
+        addedAt: new Date().toISOString()
+    });
+    
+    saveDB(db);
+    res.json({ success: true });
+});
+
+app.post('/api/user/add-email', requireAuth, (req, res) => {
+    const { email, firstName, lastName, company } = req.body;
+    const db = loadDB();
+    const user = db.users.find(u => u.id === req.session.userId);
+    
+    if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+    }
+    
+    user.emails.push({
+        email: email,
+        firstName: firstName || '',
+        lastName: lastName || '',
+        company: company || '',
+        addedAt: new Date().toISOString()
+    });
+    
+    saveDB(db);
+    res.json({ success: true });
+});
+
+app.post('/api/user/clear-emails', requireAuth, (req, res) => {
+    const db = loadDB();
+    const user = db.users.find(u => u.id === req.session.userId);
+    
+    if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+    }
+    
+    user.emails = [];
+    saveDB(db);
+    res.json({ success: true });
+});
+
+app.post('/api/user/upload', requireAuth, upload.array('files', 10), (req, res) => {
     try {
         const files = req.files.map(file => ({
             filename: file.filename,
@@ -74,26 +312,26 @@ app.post('/api/upload-attachments', upload.array('files', 10), (req, res) => {
             path: file.path,
             size: file.size
         }));
-        
-        res.json({ success: true, files: files });
+        res.json({ success: true, files });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// Send single email with attachments
-app.post('/api/send-email', async (req, res) => {
-    const { to, subject, body, fromName, accountIndex, attachments, replyTo, cc, bcc, isHtml } = req.body;
+app.post('/api/user/send-email', requireAuth, async (req, res) => {
+    const { to, subject, body, fromName, attachments, replyTo, cc, bcc, isHtml } = req.body;
+    const db = loadDB();
+    const user = db.users.find(u => u.id === req.session.userId);
     
-    if (!to || !subject || !body) {
-        return res.status(400).json({ error: 'Missing required fields' });
+    if (!user || !user.active) {
+        return res.status(403).json({ error: 'Account inactive' });
     }
     
-    if (senderAccounts.length === 0) {
-        return res.status(400).json({ error: 'No sender accounts configured' });
+    if (user.senderAccounts.length === 0) {
+        return res.status(400).json({ error: 'No sender accounts' });
     }
     
-    const account = senderAccounts[accountIndex || 0];
+    const account = user.senderAccounts[0];
     
     try {
         const transporter = nodemailer.createTransport({
@@ -104,7 +342,6 @@ app.post('/api/send-email', async (req, res) => {
             }
         });
         
-        // Prepare attachments
         let emailAttachments = [];
         if (attachments && attachments.length > 0) {
             emailAttachments = attachments.map(att => ({
@@ -121,11 +358,9 @@ app.post('/api/send-email', async (req, res) => {
             attachments: emailAttachments
         };
         
-        // Add CC/BCC if provided
         if (cc) mailOptions.cc = cc;
         if (bcc) mailOptions.bcc = bcc;
         
-        // Set body as HTML or plain text
         if (isHtml) {
             mailOptions.html = body;
         } else {
@@ -137,7 +372,9 @@ app.post('/api/send-email', async (req, res) => {
         
         account.sent++;
         account.dailySent++;
-        campaignStats.totalSent++;
+        user.stats.totalSent++;
+        
+        saveDB(db);
         
         res.json({ 
             success: true, 
@@ -146,31 +383,30 @@ app.post('/api/send-email', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('Email send error:', error);
-        campaignStats.totalFailed++;
-        res.status(500).json({ 
-            success: false, 
-            error: error.message 
-        });
+        user.stats.totalFailed++;
+        saveDB(db);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Bulk send endpoint with attachments
-app.post('/api/send-campaign', async (req, res) => {
+app.post('/api/user/send-campaign', requireAuth, async (req, res) => {
     const { recipients, subject, body, fromName, delay, attachments, replyTo, isHtml } = req.body;
+    const db = loadDB();
+    const user = db.users.find(u => u.id === req.session.userId);
     
-    if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
-        return res.status(400).json({ error: 'Recipients array required' });
+    if (!user || !user.active) {
+        return res.status(403).json({ error: 'Account inactive' });
     }
     
-    if (senderAccounts.length === 0) {
-        return res.status(400).json({ error: 'No sender accounts configured' });
+    if (!recipients || recipients.length === 0) {
+        return res.status(400).json({ error: 'No recipients' });
     }
     
-    campaignStats.lastCampaignTime = new Date();
+    if (user.senderAccounts.length === 0) {
+        return res.status(400).json({ error: 'No sender accounts' });
+    }
     
-    // Start sending in background
-    sendCampaignInBackground(recipients, subject, body, fromName, delay || 60, attachments, replyTo, isHtml);
+    sendCampaignInBackground(user.id, recipients, subject, body, fromName, delay || 60, attachments, replyTo, isHtml);
     
     res.json({ 
         success: true, 
@@ -179,18 +415,19 @@ app.post('/api/send-campaign', async (req, res) => {
     });
 });
 
-// Background campaign sender
-async function sendCampaignInBackground(recipients, subject, body, fromName, delay, attachments, replyTo, isHtml) {
-    let sent = 0;
-    let failed = 0;
+async function sendCampaignInBackground(userId, recipients, subject, body, fromName, delay, attachments, replyTo, isHtml) {
+    const db = loadDB();
+    const user = db.users.find(u => u.id === userId);
+    
+    if (!user) return;
+    
     let accountIndex = 0;
     
     for (let i = 0; i < recipients.length; i++) {
         const recipient = recipients[i];
-        const account = senderAccounts[accountIndex];
+        const account = user.senderAccounts[accountIndex];
         
         try {
-            // Replace merge tags
             let personalizedSubject = replaceMergeTags(subject, recipient);
             let personalizedBody = replaceMergeTags(body, recipient);
             
@@ -202,7 +439,6 @@ async function sendCampaignInBackground(recipients, subject, body, fromName, del
                 }
             });
             
-            // Prepare attachments
             let emailAttachments = [];
             if (attachments && attachments.length > 0) {
                 emailAttachments = attachments.map(att => ({
@@ -230,146 +466,56 @@ async function sendCampaignInBackground(recipients, subject, body, fromName, del
             
             account.sent++;
             account.dailySent++;
-            sent++;
-            campaignStats.totalSent++;
+            user.stats.totalSent++;
             
-            console.log(`✓ Sent to ${recipient.email} (${sent}/${recipients.length})`);
+            saveDB(db);
             
-            // Rotate accounts
-            accountIndex = (accountIndex + 1) % senderAccounts.length;
+            console.log(`✓ [${user.username}] Sent to ${recipient.email} (${i+1}/${recipients.length})`);
             
-            // Add delay with randomization
+            accountIndex = (accountIndex + 1) % user.senderAccounts.length;
+            
             if (i < recipients.length - 1) {
                 const randomDelay = delay + (Math.random() * 30 - 15);
                 await sleep(randomDelay * 1000);
             }
             
         } catch (error) {
-            failed++;
-            campaignStats.totalFailed++;
-            console.error(`✗ Failed to send to ${recipient.email}:`, error.message);
+            user.stats.totalFailed++;
+            saveDB(db);
+            console.error(`✗ [${user.username}] Failed: ${error.message}`);
         }
     }
-    
-    console.log(`Campaign complete! Sent: ${sent}, Failed: ${failed}`);
 }
 
-// Helper function to replace merge tags
 function replaceMergeTags(text, recipient) {
     return text
         .replace(/{Email}/g, recipient.email || '')
         .replace(/{FirstName}/g, recipient.firstName || '')
         .replace(/{LastName}/g, recipient.lastName || '')
-        .replace(/{Company}/g, recipient.company || '')
-        .replace(/{Phone}/g, recipient.phone || '')
-        .replace(/{City}/g, recipient.city || '')
-        .replace(/{Country}/g, recipient.country || '')
-        .replace(/{Custom1}/g, recipient.custom1 || '')
-        .replace(/{Custom2}/g, recipient.custom2 || '');
+        .replace(/{Company}/g, recipient.company || '');
 }
 
-// Helper function for delay
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Test endpoint
 app.get('/api/test', (req, res) => {
     res.json({ 
-        status: 'Server is running!',
-        accounts: senderAccounts.length,
-        stats: campaignStats,
+        status: 'Multi-User Email Marketing Server Running!',
+        version: '2.0',
         port: PORT
     });
 });
 
-// Get campaign stats
-app.get('/api/stats', (req, res) => {
-    res.json({
-        success: true,
-        stats: campaignStats,
-        accounts: senderAccounts.map(acc => ({
-            email: acc.email,
-            sent: acc.sent,
-            dailySent: acc.dailySent
-        }))
-    });
-});
-
-// Reset daily counters (run this daily via cron job)
-app.post('/api/reset-daily', (req, res) => {
-    senderAccounts.forEach(acc => acc.dailySent = 0);
-    res.json({ success: true, message: 'Daily counters reset' });
-});
-
-// Verify email endpoint (advanced validation)
-app.post('/api/verify-email', async (req, res) => {
-    const { email } = req.body;
-    
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    const isValid = emailRegex.test(email);
-    
-    // Additional checks
-    const disposableDomains = ['tempmail.com', '10minutemail.com', 'guerrillamail.com'];
-    const domain = email.split('@')[1];
-    const isDisposable = disposableDomains.includes(domain);
-    
-    res.json({
-        email: email,
-        valid: isValid && !isDisposable,
-        reason: !isValid ? 'Invalid format' : isDisposable ? 'Disposable email' : 'Valid'
-    });
-});
-
-// Clean up old uploaded files
-app.post('/api/cleanup-uploads', (req, res) => {
-    const uploadDir = './uploads';
-    if (fs.existsSync(uploadDir)) {
-        const files = fs.readdirSync(uploadDir);
-        const now = Date.now();
-        let deleted = 0;
-        
-        files.forEach(file => {
-            const filePath = path.join(uploadDir, file);
-            const stats = fs.statSync(filePath);
-            const age = now - stats.mtimeMs;
-            
-            // Delete files older than 24 hours
-            if (age > 24 * 60 * 60 * 1000) {
-                fs.unlinkSync(filePath);
-                deleted++;
-            }
-        });
-        
-        res.json({ success: true, deleted: deleted });
-    } else {
-        res.json({ success: true, deleted: 0 });
-    }
-});
-
-// Start server
 app.listen(PORT, () => {
     console.log(`
-╔════════════════════════════════════════════════╗
-║   Email Marketing Backend Server - ENHANCED    ║
-║   Server running on http://localhost:${PORT}    ║
-║                                                ║
-║   NEW FEATURES:                                ║
-║   ✓ PDF & File Attachments (up to 25MB)       ║
-║   ✓ HTML Email Support                         ║
-║   ✓ CC/BCC Support                             ║
-║   ✓ Reply-To Configuration                     ║
-║   ✓ Advanced Statistics                        ║
-║   ✓ Daily Limits Tracking                      ║
-║                                                ║
-║   API Endpoints:                               ║
-║   POST /api/add-account                        ║
-║   POST /api/send-email                         ║
-║   POST /api/send-campaign                      ║
-║   POST /api/upload-attachments                 ║
-║   POST /api/verify-email                       ║
-║   GET  /api/test                               ║
-║   GET  /api/stats                              ║
-╚════════════════════════════════════════════════╝
+╔═════════════════════════════════════════════════════════╗
+║   MULTI-USER EMAIL MARKETING SYSTEM                     ║
+║   Server: http://localhost:${PORT}                       ║
+║                                                         ║
+║   DEFAULT ADMIN LOGIN:                                  ║
+║   Username: admin                                       ║
+║   Password: admin123                                    ║
+╚═════════════════════════════════════════════════════════╝
     `);
 });
