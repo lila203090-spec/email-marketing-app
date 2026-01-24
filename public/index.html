@@ -44,6 +44,9 @@
         .user-table th { background: #34495e; color: white; }
         .status-active { color: #27ae60; font-weight: bold; }
         .status-inactive { color: #e74c3c; font-weight: bold; }
+        .account-item { background: #2c3e50; padding: 8px; margin: 5px 0; border-radius: 3px; display: flex; justify-content: space-between; align-items: center; }
+        .remove-account-btn { background: #e74c3c; color: white; border: none; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+        .remove-account-btn:hover { background: #c0392b; }
     </style>
 </head>
 <body>
@@ -55,7 +58,7 @@
             <input type="password" id="loginPassword" placeholder="Password" onkeypress="if(event.key=='Enter')login()">
             <button onclick="login()">Login</button>
             <div style="text-align: center; margin-top: 20px; color: #7f8c8d; font-size: 13px;">
-                Contact administrator for credentials-Admin=Digonta
+                Contact administrator for credentials
             </div>
         </div>
     </div>
@@ -124,7 +127,7 @@
 
                     <h3>📧 Sender Accounts</h3>
                     <input type="email" id="senderEmail" placeholder="Gmail" style="width: 100%; padding: 8px; margin-bottom: 5px; border-radius: 3px; border: 1px solid #555;">
-                    <input type="password" id="senderPassword" placeholder="App Password" style="width: 100%; padding: 8px; margin-bottom: 10px; border-radius: 3px; border: 1px solid #555;">
+                    <input type="password" id="senderPassword" placeholder="App Password (no spaces)" style="width: 100%; padding: 8px; margin-bottom: 10px; border-radius: 3px; border: 1px solid #555;">
                     <button class="btn btn-success" onclick="addAccount()" style="width: 100%;">➕ Add</button>
                     <div id="accountList" style="margin-top: 10px; font-size: 13px;"></div>
 
@@ -356,12 +359,20 @@ Best regards</textarea>
             if (userData.senderAccounts.length === 0) {
                 list.innerHTML = '<div style="text-align: center; color: #95a5a6; padding: 20px;">No accounts</div>';
             } else {
-                list.innerHTML = userData.senderAccounts.map(a => `
-                    <div style="background: #2c3e50; padding: 8px; margin: 5px 0; border-radius: 3px;">
-                        ${a.email} (${a.sent})
+                list.innerHTML = userData.senderAccounts.map((a, i) => `
+                    <div class="account-item">
+                        <div>${a.email} (${a.sent})</div>
+                        <button class="remove-account-btn" onclick="removeAccount(${i})">✕</button>
                     </div>
                 `).join('');
             }
+        }
+
+        async function removeAccount(index) {
+            if (!confirm('Remove this account? You will need to logout and login again for this to persist.')) return;
+            userData.senderAccounts.splice(index, 1);
+            updateAccountList();
+            addLog('✓ Account removed. Logout and login again to save permanently.');
         }
 
         async function addEmail() {
@@ -385,26 +396,56 @@ Best regards</textarea>
 
         async function addAccount() {
             const email = document.getElementById('senderEmail').value.trim();
-            const password = document.getElementById('senderPassword').value.trim();
-            if (!email || !password) return;
-            await fetch(`${API}/user/add-account`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
-                body: JSON.stringify({ email, password })
-            });
-            document.getElementById('senderEmail').value = '';
-            document.getElementById('senderPassword').value = '';
-            loadUserData();
+            const password = document.getElementById('senderPassword').value.trim().replace(/\s/g, '');
+            
+            if (!email || !password) {
+                alert('Enter both email and password');
+                return;
+            }
+            
+            if (password.includes(' ')) {
+                alert('Remove all spaces from app password!');
+                return;
+            }
+            
+            try {
+                const res = await fetch(`${API}/user/add-account`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ email, password })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('senderEmail').value = '';
+                    document.getElementById('senderPassword').value = '';
+                    loadUserData();
+                    addLog('✓ Account added: ' + email);
+                    alert('Account added successfully!');
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
         }
 
         async function handleFiles(e) {
             const formData = new FormData();
             Array.from(e.target.files).forEach(f => formData.append('files', f));
-            const res = await fetch(`${API}/user/upload`, { method: 'POST', credentials: 'include', body: formData });
-            const data = await res.json();
-            uploadedFiles = data.files;
-            displayAttachments();
+            try {
+                const res = await fetch(`${API}/user/upload`, { method: 'POST', credentials: 'include', body: formData });
+                const data = await res.json();
+                if (data.success) {
+                    uploadedFiles = data.files;
+                    displayAttachments();
+                    addLog('✓ Files uploaded: ' + data.files.length);
+                } else {
+                    alert('Upload failed: ' + data.error);
+                }
+            } catch (e) {
+                alert('Upload error: ' + e.message);
+            }
         }
 
         function displayAttachments() {
@@ -415,20 +456,30 @@ Best regards</textarea>
         async function sendTest() {
             const testEmail = prompt('Test email:');
             if (!testEmail) return;
-            const res = await fetch(`${API}/user/send-email`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
-                body: JSON.stringify({
-                    to: testEmail,
-                    subject: document.getElementById('emailSubject').value,
-                    body: document.getElementById('emailBody').value,
-                    fromName: document.getElementById('fromName').value,
-                    attachments: uploadedFiles
-                })
-            });
-            const data = await res.json();
-            alert(data.success ? 'Sent!' : 'Failed: ' + data.error);
+            try {
+                const res = await fetch(`${API}/user/send-email`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        to: testEmail,
+                        subject: document.getElementById('emailSubject').value,
+                        body: document.getElementById('emailBody').value,
+                        fromName: document.getElementById('fromName').value,
+                        attachments: uploadedFiles
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert('Test email sent! Check inbox/spam.');
+                    addLog('✓ Test sent to: ' + testEmail);
+                } else {
+                    alert('Failed: ' + data.error);
+                    addLog('✗ Failed: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
         }
 
         async function startCampaign() {
@@ -436,24 +487,32 @@ Best regards</textarea>
                 alert('Add recipients');
                 return;
             }
+            if (userData.senderAccounts.length === 0) {
+                alert('Add Gmail account first');
+                return;
+            }
             if (!confirm(`Send to ${userData.emails.length}?`)) return;
-            const res = await fetch(`${API}/user/send-campaign`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
-                body: JSON.stringify({
-                    recipients: userData.emails,
-                    subject: document.getElementById('emailSubject').value,
-                    body: document.getElementById('emailBody').value,
-                    fromName: document.getElementById('fromName').value,
-                    delay: parseInt(document.getElementById('sendDelay').value),
-                    attachments: uploadedFiles
-                })
-            });
-            const data = await res.json();
-            if (data.success) {
-                addLog('✓ Started!');
-                simulateProgress();
+            try {
+                const res = await fetch(`${API}/user/send-campaign`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        recipients: userData.emails,
+                        subject: document.getElementById('emailSubject').value,
+                        body: document.getElementById('emailBody').value,
+                        fromName: document.getElementById('fromName').value,
+                        delay: parseInt(document.getElementById('sendDelay').value),
+                        attachments: uploadedFiles
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    addLog('✓ Campaign started!');
+                    simulateProgress();
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
             }
         }
 
