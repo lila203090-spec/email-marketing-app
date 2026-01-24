@@ -11,19 +11,19 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Enhanced CORS
 app.use(cors({
     origin: true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-Requested-With']
 }));
 
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static('public'));
 
-// Session configuration
+// Session
 app.use(session({
     secret: 'email-marketing-secret-key-2024',
     resave: false,
@@ -36,7 +36,7 @@ app.use(session({
     }
 }));
 
-// File upload configuration
+// File upload
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
         const uploadDir = './uploads';
@@ -59,10 +59,6 @@ const upload = multer({
     limits: { 
         fileSize: 25 * 1024 * 1024,
         files: 10
-    },
-    fileFilter: function(req, file, cb) {
-        console.log('Uploading file:', file.originalname);
-        cb(null, true);
     }
 });
 
@@ -92,7 +88,6 @@ function saveDB(db) {
 
 // Auth middleware
 function requireAuth(req, res, next) {
-    console.log('Auth check - Session userId:', req.session.userId);
     if (!req.session.userId) {
         return res.status(401).json({ error: 'Not authenticated' });
     }
@@ -106,19 +101,16 @@ function requireAdmin(req, res, next) {
     next();
 }
 
-// AUTH ENDPOINTS
+// AUTH
 app.post('/api/auth/login', (req, res) => {
     const { username, password } = req.body;
     const db = loadDB();
-    
-    console.log('Login attempt:', username);
     
     if (username === db.admin.username) {
         if (bcrypt.compareSync(password, db.admin.password)) {
             req.session.userId = 'admin';
             req.session.username = username;
             req.session.role = 'admin';
-            console.log('Admin login successful');
             return res.json({ 
                 success: true, 
                 role: 'admin',
@@ -135,7 +127,6 @@ app.post('/api/auth/login', (req, res) => {
         req.session.userId = user.id;
         req.session.username = user.username;
         req.session.role = 'user';
-        console.log('User login successful:', user.id);
         return res.json({ 
             success: true, 
             role: 'user',
@@ -163,17 +154,17 @@ app.get('/api/auth/check', (req, res) => {
     }
 });
 
-// ADMIN ENDPOINTS
+// ADMIN
 app.post('/api/admin/create-user', requireAdmin, (req, res) => {
     const { username, password, email, dailyLimit } = req.body;
     const db = loadDB();
     
     if (db.users.find(u => u.username === username)) {
-        return res.status(400).json({ error: 'Username already exists' });
+        return res.status(400).json({ error: 'Username exists' });
     }
     
     if (db.users.find(u => u.email === email)) {
-        return res.status(400).json({ error: 'Email already exists' });
+        return res.status(400).json({ error: 'Email exists' });
     }
     
     const newUser = {
@@ -186,16 +177,11 @@ app.post('/api/admin/create-user', requireAdmin, (req, res) => {
         createdAt: new Date().toISOString(),
         senderAccounts: [],
         emails: [],
-        stats: {
-            totalSent: 0,
-            totalFailed: 0,
-            lastLogin: null
-        }
+        stats: { totalSent: 0, totalFailed: 0 }
     };
     
     db.users.push(newUser);
     saveDB(db);
-    
     res.json({ success: true, userId: newUser.id });
 });
 
@@ -251,12 +237,10 @@ app.get('/api/admin/stats', requireAdmin, (req, res) => {
     res.json({ success: true, stats });
 });
 
-// USER ENDPOINTS
+// USER
 app.get('/api/user/data', requireAuth, (req, res) => {
     const db = loadDB();
     const user = db.users.find(u => u.id === req.session.userId);
-    
-    console.log('Getting user data for:', req.session.userId);
     
     if (!user) {
         return res.status(404).json({ error: 'User not found' });
@@ -282,9 +266,6 @@ app.post('/api/user/add-account', requireAuth, (req, res) => {
     const db = loadDB();
     const user = db.users.find(u => u.id === req.session.userId);
     
-    console.log('Adding account for user:', req.session.userId);
-    console.log('Account email:', email);
-    
     if (!user) {
         return res.status(404).json({ error: 'User not found' });
     }
@@ -293,30 +274,30 @@ app.post('/api/user/add-account', requireAuth, (req, res) => {
         return res.status(400).json({ error: 'Email and password required' });
     }
     
-    // Check if account already exists
-    if (user.senderAccounts && user.senderAccounts.find(acc => acc.email === email)) {
-        return res.status(400).json({ error: 'Account already exists' });
-    }
+    const cleanPassword = password.replace(/\s/g, '');
     
     if (!user.senderAccounts) {
         user.senderAccounts = [];
     }
     
+    if (user.senderAccounts.find(acc => acc.email === email)) {
+        return res.status(400).json({ error: 'Account exists' });
+    }
+    
     user.senderAccounts.push({
         email: email,
-        password: password,
+        password: cleanPassword,
         sent: 0,
         dailySent: 0,
         addedAt: new Date().toISOString()
     });
     
     saveDB(db);
-    console.log('Account added successfully');
-    res.json({ success: true, message: 'Account added successfully' });
+    res.json({ success: true, message: 'Account added' });
 });
 
 app.post('/api/user/add-email', requireAuth, (req, res) => {
-    const { email, firstName, lastName, company } = req.body;
+    const { email } = req.body;
     const db = loadDB();
     const user = db.users.find(u => u.id === req.session.userId);
     
@@ -334,9 +315,9 @@ app.post('/api/user/add-email', requireAuth, (req, res) => {
     
     user.emails.push({
         email: email,
-        firstName: firstName || '',
-        lastName: lastName || '',
-        company: company || '',
+        firstName: '',
+        lastName: '',
+        company: '',
         addedAt: new Date().toISOString()
     });
     
@@ -359,14 +340,10 @@ app.post('/api/user/clear-emails', requireAuth, (req, res) => {
 
 app.post('/api/user/upload', requireAuth, upload.array('files', 10), (req, res) => {
     try {
-        console.log('Upload request received');
-        console.log('Session userId:', req.session.userId);
-        console.log('Files received:', req.files ? req.files.length : 0);
-        
         if (!req.files || req.files.length === 0) {
             return res.status(400).json({ 
                 success: false, 
-                error: 'No files uploaded' 
+                error: 'No files' 
             });
         }
         
@@ -377,7 +354,6 @@ app.post('/api/user/upload', requireAuth, upload.array('files', 10), (req, res) 
             size: file.size
         }));
         
-        console.log('Files processed successfully:', files.length);
         res.json({ success: true, files: files });
     } catch (error) {
         console.error('Upload error:', error);
@@ -389,7 +365,7 @@ app.post('/api/user/upload', requireAuth, upload.array('files', 10), (req, res) 
 });
 
 app.post('/api/user/send-email', requireAuth, async (req, res) => {
-    const { to, subject, body, fromName, attachments, replyTo, cc, bcc, isHtml } = req.body;
+    const { to, subject, body, fromName, attachments } = req.body;
     const db = loadDB();
     const user = db.users.find(u => u.id === req.session.userId);
     
@@ -398,19 +374,30 @@ app.post('/api/user/send-email', requireAuth, async (req, res) => {
     }
     
     if (!user.senderAccounts || user.senderAccounts.length === 0) {
-        return res.status(400).json({ error: 'No sender accounts configured' });
+        return res.status(400).json({ error: 'No sender accounts' });
     }
     
     const account = user.senderAccounts[0];
     
     try {
         const transporter = nodemailer.createTransport({
-            service: 'gmail',
+            host: 'smtp.gmail.com',
+            port: 587,
+            secure: false,
             auth: {
                 user: account.email,
                 pass: account.password
-            }
+            },
+            tls: {
+                rejectUnauthorized: false
+            },
+            connectionTimeout: 10000,
+            greetingTimeout: 10000,
+            socketTimeout: 10000
         });
+        
+        // Verify connection
+        await transporter.verify();
         
         let emailAttachments = [];
         if (attachments && attachments.length > 0) {
@@ -424,19 +411,10 @@ app.post('/api/user/send-email', requireAuth, async (req, res) => {
             from: fromName ? `"${fromName}" <${account.email}>` : account.email,
             to: to,
             subject: subject,
-            replyTo: replyTo || account.email,
+            text: body,
+            html: body.replace(/\n/g, '<br>'),
             attachments: emailAttachments
         };
-        
-        if (cc) mailOptions.cc = cc;
-        if (bcc) mailOptions.bcc = bcc;
-        
-        if (isHtml) {
-            mailOptions.html = body;
-        } else {
-            mailOptions.text = body;
-            mailOptions.html = body.replace(/\n/g, '<br>');
-        }
         
         await transporter.sendMail(mailOptions);
         
@@ -448,19 +426,22 @@ app.post('/api/user/send-email', requireAuth, async (req, res) => {
         
         res.json({ 
             success: true, 
-            message: `Email sent to ${to}`,
-            sentCount: account.sent
+            message: `Sent to ${to}`
         });
         
     } catch (error) {
+        console.error('Send error:', error);
         user.stats.totalFailed++;
         saveDB(db);
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message || 'Failed to send' 
+        });
     }
 });
 
 app.post('/api/user/send-campaign', requireAuth, async (req, res) => {
-    const { recipients, subject, body, fromName, delay, attachments, replyTo, isHtml } = req.body;
+    const { recipients, subject, body, fromName, delay, attachments } = req.body;
     const db = loadDB();
     const user = db.users.find(u => u.id === req.session.userId);
     
@@ -473,10 +454,10 @@ app.post('/api/user/send-campaign', requireAuth, async (req, res) => {
     }
     
     if (!user.senderAccounts || user.senderAccounts.length === 0) {
-        return res.status(400).json({ error: 'No sender accounts configured' });
+        return res.status(400).json({ error: 'No sender accounts' });
     }
     
-    sendCampaignInBackground(user.id, recipients, subject, body, fromName, delay || 60, attachments, replyTo, isHtml);
+    sendCampaignInBackground(user.id, recipients, subject, body, fromName, delay || 60, attachments);
     
     res.json({ 
         success: true, 
@@ -485,7 +466,7 @@ app.post('/api/user/send-campaign', requireAuth, async (req, res) => {
     });
 });
 
-async function sendCampaignInBackground(userId, recipients, subject, body, fromName, delay, attachments, replyTo, isHtml) {
+async function sendCampaignInBackground(userId, recipients, subject, body, fromName, delay, attachments) {
     let db = loadDB();
     let user = db.users.find(u => u.id === userId);
     
@@ -498,16 +479,23 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
         const account = user.senderAccounts[accountIndex];
         
         try {
-            let personalizedSubject = replaceMergeTags(subject, recipient);
-            let personalizedBody = replaceMergeTags(body, recipient);
-            
             const transporter = nodemailer.createTransport({
-                service: 'gmail',
+                host: 'smtp.gmail.com',
+                port: 587,
+                secure: false,
                 auth: {
                     user: account.email,
                     pass: account.password
-                }
+                },
+                tls: {
+                    rejectUnauthorized: false
+                },
+                connectionTimeout: 10000,
+                greetingTimeout: 10000,
+                socketTimeout: 10000
             });
+            
+            await transporter.verify();
             
             let emailAttachments = [];
             if (attachments && attachments.length > 0) {
@@ -520,17 +508,11 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
             const mailOptions = {
                 from: fromName ? `"${fromName}" <${account.email}>` : account.email,
                 to: recipient.email,
-                subject: personalizedSubject,
-                replyTo: replyTo || account.email,
+                subject: subject,
+                text: body,
+                html: body.replace(/\n/g, '<br>'),
                 attachments: emailAttachments
             };
-            
-            if (isHtml) {
-                mailOptions.html = personalizedBody;
-            } else {
-                mailOptions.text = personalizedBody;
-                mailOptions.html = personalizedBody.replace(/\n/g, '<br>');
-            }
             
             await transporter.sendMail(mailOptions);
             
@@ -546,7 +528,7 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
             user.stats.totalSent = account.sent;
             saveDB(db);
             
-            console.log(`✓ [${user.username}] Sent to ${recipient.email} (${i+1}/${recipients.length})`);
+            console.log(`✓ Sent to ${recipient.email} (${i+1}/${recipients.length})`);
             
             accountIndex = (accountIndex + 1) % user.senderAccounts.length;
             
@@ -558,18 +540,9 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
         } catch (error) {
             user.stats.totalFailed++;
             saveDB(db);
-            console.error(`✗ [${user.username}] Failed: ${error.message}`);
+            console.error(`✗ Failed to ${recipient.email}: ${error.message}`);
         }
     }
-}
-
-function replaceMergeTags(text, recipient) {
-    if (!text) return '';
-    return text
-        .replace(/{Email}/g, recipient.email || '')
-        .replace(/{FirstName}/g, recipient.firstName || '')
-        .replace(/{LastName}/g, recipient.lastName || '')
-        .replace(/{Company}/g, recipient.company || '');
 }
 
 function sleep(ms) {
@@ -578,26 +551,22 @@ function sleep(ms) {
 
 app.get('/api/test', (req, res) => {
     res.json({ 
-        status: 'Multi-User Email Marketing Server Running!',
+        status: 'Running',
         version: '2.0',
         port: PORT
     });
 });
 
-// Serve index.html for root path
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, () => {
     console.log(`
-╔═════════════════════════════════════════════════════════╗
-║   MULTI-USER EMAIL MARKETING SYSTEM                     ║
-║   Server: http://localhost:${PORT}                       ║
-║                                                         ║
-║   DEFAULT ADMIN LOGIN:                                  ║
-║   Username: Digonta                                     ║
-║   Password: Digonta123                                  ║
-╚═════════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════╗
+║   EMAIL MARKETING SYSTEM                  ║
+║   Port: ${PORT}                            ║
+║   Admin: Digonta / Digonta123             ║
+╚═══════════════════════════════════════════╝
     `);
 });
