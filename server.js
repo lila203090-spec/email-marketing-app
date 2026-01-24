@@ -11,7 +11,6 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enhanced CORS
 app.use(cors({
     origin: true,
     credentials: true,
@@ -23,7 +22,6 @@ app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static('public'));
 
-// Session
 app.use(session({
     secret: 'email-marketing-secret-key-2024',
     resave: false,
@@ -36,7 +34,6 @@ app.use(session({
     }
 }));
 
-// File upload
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
         const uploadDir = './uploads';
@@ -62,7 +59,6 @@ const upload = multer({
     }
 });
 
-// Database
 const DB_FILE = './database.json';
 
 function loadDB() {
@@ -86,7 +82,6 @@ function saveDB(db) {
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
-// Auth middleware
 function requireAuth(req, res, next) {
     if (!req.session.userId) {
         return res.status(401).json({ error: 'Not authenticated' });
@@ -99,6 +94,128 @@ function requireAdmin(req, res, next) {
         return res.status(403).json({ error: 'Admin access required' });
     }
     next();
+}
+
+// Detect email provider from email address
+function getEmailProvider(email) {
+    const domain = email.split('@')[1].toLowerCase();
+    
+    const providers = {
+        'gmail.com': {
+            host: 'smtp.gmail.com',
+            port: 465,
+            secure: true
+        },
+        'outlook.com': {
+            host: 'smtp-mail.outlook.com',
+            port: 587,
+            secure: false
+        },
+        'hotmail.com': {
+            host: 'smtp-mail.outlook.com',
+            port: 587,
+            secure: false
+        },
+        'yahoo.com': {
+            host: 'smtp.mail.yahoo.com',
+            port: 465,
+            secure: true
+        },
+        'zoho.com': {
+            host: 'smtp.zoho.com',
+            port: 465,
+            secure: true
+        }
+    };
+    
+    return providers[domain] || {
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true
+    };
+}
+
+// Create transporter with retry logic
+async function createTransporter(email, password) {
+    const provider = getEmailProvider(email);
+    
+    const config = {
+        host: provider.host,
+        port: provider.port,
+        secure: provider.secure,
+        auth: {
+            user: email,
+            pass: password
+        },
+        tls: {
+            rejectUnauthorized: false,
+            minVersion: 'TLSv1.2'
+        },
+        connectionTimeout: 15000,
+        greetingTimeout: 15000,
+        socketTimeout: 15000,
+        pool: true,
+        maxConnections: 1,
+        maxMessages: 100
+    };
+    
+    const transporter = nodemailer.createTransport(config);
+    
+    try {
+        await transporter.verify();
+        console.log(`✓ Connected to ${provider.host}`);
+        return transporter;
+    } catch (error) {
+        console.error(`✗ Failed to connect to ${provider.host}:`, error.message);
+        
+        // Try alternative port
+        if (provider.port === 465) {
+            console.log('Trying port 587...');
+            config.port = 587;
+            config.secure = false;
+            const altTransporter = nodemailer.createTransport(config);
+            await altTransporter.verify();
+            return altTransporter;
+        } else {
+            console.log('Trying port 465...');
+            config.port = 465;
+            config.secure = true;
+            const altTransporter = nodemailer.createTransport(config);
+            await altTransporter.verify();
+            return altTransporter;
+        }
+    }
+}
+
+function addSpamBypassHeaders(mailOptions, fromName, senderEmail) {
+    const now = new Date();
+    
+    mailOptions.headers = {
+        'X-Mailer': 'Microsoft Outlook 16.0',
+        'X-Priority': '3',
+        'X-MSMail-Priority': 'Normal',
+        'Importance': 'Normal',
+        'Message-ID': `<${Date.now()}.${Math.random().toString(36).substring(7)}@${senderEmail.split('@')[1]}>`,
+        'Date': now.toUTCString(),
+        'MIME-Version': '1.0',
+        'List-Unsubscribe': `<mailto:unsubscribe@${senderEmail.split('@')[1]}>`
+    };
+    
+    return mailOptions;
+}
+
+function cleanEmailContent(text) {
+    if (!text) return '';
+    
+    const spamWords = ['free', 'click here', 'buy now', 'limited time', 'act now', 'winner', 'congratulations'];
+    let cleaned = text;
+    
+    spamWords.forEach(word => {
+        const regex = new RegExp(`\\b${word}\\b`, 'gi');
+        cleaned = cleaned.replace(regex, word.split('').join('\u200B'));
+    });
+    
+    return cleaned;
 }
 
 // AUTH
@@ -194,8 +311,8 @@ app.get('/api/admin/users', requireAdmin, (req, res) => {
         active: u.active,
         dailyLimit: u.dailyLimit,
         stats: u.stats,
-        senderAccounts: u.senderAccounts.length,
-        emails: u.emails.length
+        senderAccounts: u.senderAccounts ? u.senderAccounts.length : 0,
+        emails: u.emails ? u.emails.length : 0
     }));
     res.json({ success: true, users });
 });
@@ -229,10 +346,10 @@ app.get('/api/admin/stats', requireAdmin, (req, res) => {
     const stats = {
         totalUsers: db.users.length,
         activeUsers: db.users.filter(u => u.active).length,
-        totalSent: db.users.reduce((sum, u) => sum + u.stats.totalSent, 0),
-        totalFailed: db.users.reduce((sum, u) => sum + u.stats.totalFailed, 0),
-        totalEmails: db.users.reduce((sum, u) => sum + u.emails.length, 0),
-        totalAccounts: db.users.reduce((sum, u) => sum + u.senderAccounts.length, 0)
+        totalSent: db.users.reduce((sum, u) => sum + (u.stats.totalSent || 0), 0),
+        totalFailed: db.users.reduce((sum, u) => sum + (u.stats.totalFailed || 0), 0),
+        totalEmails: db.users.reduce((sum, u) => sum + (u.emails ? u.emails.length : 0), 0),
+        totalAccounts: db.users.reduce((sum, u) => sum + (u.senderAccounts ? u.senderAccounts.length : 0), 0)
     };
     res.json({ success: true, stats });
 });
@@ -255,8 +372,8 @@ app.get('/api/user/data', requireAuth, (req, res) => {
                 sent: acc.sent || 0,
                 dailySent: acc.dailySent || 0
             })),
-            stats: user.stats,
-            dailyLimit: user.dailyLimit
+            stats: user.stats || { totalSent: 0, totalFailed: 0 },
+            dailyLimit: user.dailyLimit || 500
         }
     });
 });
@@ -294,6 +411,25 @@ app.post('/api/user/add-account', requireAuth, (req, res) => {
     
     saveDB(db);
     res.json({ success: true, message: 'Account added' });
+});
+
+app.post('/api/user/remove-account', requireAuth, (req, res) => {
+    const { index } = req.body;
+    const db = loadDB();
+    const user = db.users.find(u => u.id === req.session.userId);
+    
+    if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (!user.senderAccounts || index < 0 || index >= user.senderAccounts.length) {
+        return res.status(400).json({ error: 'Invalid account index' });
+    }
+    
+    user.senderAccounts.splice(index, 1);
+    saveDB(db);
+    
+    res.json({ success: true, message: 'Account removed' });
 });
 
 app.post('/api/user/add-email', requireAuth, (req, res) => {
@@ -380,24 +516,7 @@ app.post('/api/user/send-email', requireAuth, async (req, res) => {
     const account = user.senderAccounts[0];
     
     try {
-        const transporter = nodemailer.createTransport({
-            host: 'smtp.gmail.com',
-            port: 587,
-            secure: false,
-            auth: {
-                user: account.email,
-                pass: account.password
-            },
-            tls: {
-                rejectUnauthorized: false
-            },
-            connectionTimeout: 10000,
-            greetingTimeout: 10000,
-            socketTimeout: 10000
-        });
-        
-        // Verify connection
-        await transporter.verify();
+        const transporter = await createTransporter(account.email, account.password);
         
         let emailAttachments = [];
         if (attachments && attachments.length > 0) {
@@ -407,14 +526,19 @@ app.post('/api/user/send-email', requireAuth, async (req, res) => {
             }));
         }
         
-        const mailOptions = {
+        const cleanedSubject = cleanEmailContent(subject);
+        const cleanedBody = cleanEmailContent(body);
+        
+        let mailOptions = {
             from: fromName ? `"${fromName}" <${account.email}>` : account.email,
             to: to,
-            subject: subject,
-            text: body,
-            html: body.replace(/\n/g, '<br>'),
+            subject: cleanedSubject,
+            text: cleanedBody,
+            html: `<div style="font-family: Arial, sans-serif;">${cleanedBody.replace(/\n/g, '<br>')}</div>`,
             attachments: emailAttachments
         };
+        
+        mailOptions = addSpamBypassHeaders(mailOptions, fromName, account.email);
         
         await transporter.sendMail(mailOptions);
         
@@ -435,7 +559,7 @@ app.post('/api/user/send-email', requireAuth, async (req, res) => {
         saveDB(db);
         res.status(500).json({ 
             success: false, 
-            error: error.message || 'Failed to send' 
+            error: `Failed: ${error.message}. Check your app password and try again.`
         });
     }
 });
@@ -473,29 +597,16 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
     if (!user) return;
     
     let accountIndex = 0;
+    let transporter = null;
     
     for (let i = 0; i < recipients.length; i++) {
         const recipient = recipients[i];
         const account = user.senderAccounts[accountIndex];
         
         try {
-            const transporter = nodemailer.createTransport({
-                host: 'smtp.gmail.com',
-                port: 587,
-                secure: false,
-                auth: {
-                    user: account.email,
-                    pass: account.password
-                },
-                tls: {
-                    rejectUnauthorized: false
-                },
-                connectionTimeout: 10000,
-                greetingTimeout: 10000,
-                socketTimeout: 10000
-            });
-            
-            await transporter.verify();
+            if (!transporter) {
+                transporter = await createTransporter(account.email, account.password);
+            }
             
             let emailAttachments = [];
             if (attachments && attachments.length > 0) {
@@ -505,14 +616,19 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
                 }));
             }
             
-            const mailOptions = {
+            const cleanedSubject = cleanEmailContent(subject);
+            const cleanedBody = cleanEmailContent(body);
+            
+            let mailOptions = {
                 from: fromName ? `"${fromName}" <${account.email}>` : account.email,
                 to: recipient.email,
-                subject: subject,
-                text: body,
-                html: body.replace(/\n/g, '<br>'),
+                subject: cleanedSubject,
+                text: cleanedBody,
+                html: `<div style="font-family: Arial, sans-serif;">${cleanedBody.replace(/\n/g, '<br>')}</div>`,
                 attachments: emailAttachments
             };
+            
+            mailOptions = addSpamBypassHeaders(mailOptions, fromName, account.email);
             
             await transporter.sendMail(mailOptions);
             
@@ -532,6 +648,11 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
             
             accountIndex = (accountIndex + 1) % user.senderAccounts.length;
             
+            if (accountIndex === 0 && transporter) {
+                transporter.close();
+                transporter = null;
+            }
+            
             if (i < recipients.length - 1) {
                 const randomDelay = delay + (Math.random() * 30 - 15);
                 await sleep(randomDelay * 1000);
@@ -541,7 +662,16 @@ async function sendCampaignInBackground(userId, recipients, subject, body, fromN
             user.stats.totalFailed++;
             saveDB(db);
             console.error(`✗ Failed to ${recipient.email}: ${error.message}`);
+            
+            if (transporter) {
+                transporter.close();
+                transporter = null;
+            }
         }
+    }
+    
+    if (transporter) {
+        transporter.close();
     }
 }
 
@@ -552,7 +682,7 @@ function sleep(ms) {
 app.get('/api/test', (req, res) => {
     res.json({ 
         status: 'Running',
-        version: '2.0',
+        version: '2.2',
         port: PORT
     });
 });
@@ -564,9 +694,11 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`
 ╔═══════════════════════════════════════════╗
-║   EMAIL MARKETING SYSTEM                  ║
+║   EMAIL MARKETING SYSTEM v2.2             ║
 ║   Port: ${PORT}                            ║
-║   Admin: Digonta / Digonta123             ║
+║   ✓ Multi-provider support                ║
+║   ✓ Auto port detection                   ║
+║   ✓ Spam bypass enabled                   ║
 ╚═══════════════════════════════════════════╝
     `);
 });
