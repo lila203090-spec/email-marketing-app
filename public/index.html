@@ -369,10 +369,27 @@ Best regards</textarea>
         }
 
         async function removeAccount(index) {
-            if (!confirm('Remove this account? You will need to logout and login again for this to persist.')) return;
-            userData.senderAccounts.splice(index, 1);
-            updateAccountList();
-            addLog('✓ Account removed. Logout and login again to save permanently.');
+            if (!confirm('Remove this account permanently?')) return;
+            
+            try {
+                const res = await fetch(`${API}/user/remove-account`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ index: index })
+                });
+                
+                const data = await res.json();
+                
+                if (data.success) {
+                    addLog('✓ Account removed permanently');
+                    loadUserData();
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
         }
 
         async function addEmail() {
@@ -448,29 +465,26 @@ Best regards</textarea>
             }
         }
 
-async function removeAccount(index) {
-    if (!confirm('Remove this account permanently?')) return;
-    
-    try {
-        const res = await fetch(`${API}/user/remove-account`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ index: index })
-        });
-        
-        const data = await res.json();
-        
-        if (data.success) {
-            addLog('✓ Account removed permanently');
-            loadUserData(); // Reload fresh data
-        } else {
-            alert('Error: ' + data.error);
+        function displayAttachments() {
+            const list = document.getElementById('attachmentList');
+            list.innerHTML = uploadedFiles.map(f => `<div class="attachment-item">📎 ${f.originalname}</div>`).join('');
         }
-    } catch (e) {
-        alert('Error: ' + e.message);
-    }
-}
+
+        async function sendTest() {
+            const testEmail = prompt('Test email:');
+            if (!testEmail) return;
+            try {
+                const res = await fetch(`${API}/user/send-email`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        to: testEmail,
+                        subject: document.getElementById('emailSubject').value,
+                        body: document.getElementById('emailBody').value,
+                        fromName: document.getElementById('fromName').value,
+                        attachments: uploadedFiles
+                    })
                 });
                 const data = await res.json();
                 if (data.success) {
@@ -583,17 +597,3 @@ async function removeAccount(index) {
                     document.getElementById('userRole').textContent = data.role;
                     document.getElementById('loginPage').style.display = 'none';
                     document.getElementById('app').style.display = 'block';
-                    currentRole = data.role;
-                    if (data.role === 'admin') {
-                        document.getElementById('adminPanel').style.display = 'block';
-                        loadUsers();
-                        loadAdminStats();
-                    } else {
-                        document.getElementById('userPanel').style.display = 'block';
-                        loadUserData();
-                    }
-                }
-            });
-    </script>
-</body>
-</html>
